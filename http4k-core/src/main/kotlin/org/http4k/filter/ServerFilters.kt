@@ -447,4 +447,22 @@ object ServerFilters {
             }
         }
     }
+
+    /**
+     * Sets the incoming request in memory, so it can be accessed in classes that don't have direct access to it
+     */
+    object ThreadLocalRequestFilter {
+
+        internal val INTERNAL_THREAD_LOCAL = ThreadLocal<Request>()
+
+        val REQUEST: Request?
+            get() = INTERNAL_THREAD_LOCAL.get()
+
+        operator fun invoke(): Filter = Filter { next ->
+            {
+                INTERNAL_THREAD_LOCAL.set(it)
+                next(it).also { INTERNAL_THREAD_LOCAL.remove() }
+            }
+        }
+    }
 }

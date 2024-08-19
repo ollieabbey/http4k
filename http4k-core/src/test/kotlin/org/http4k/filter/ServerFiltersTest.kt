@@ -12,6 +12,7 @@ import org.http4k.core.ContentType.Companion.APPLICATION_JSON
 import org.http4k.core.ContentType.Companion.OCTET_STREAM
 import org.http4k.core.ContentType.Companion.TEXT_HTML
 import org.http4k.core.Headers
+import org.http4k.core.HttpHandler
 import org.http4k.core.Method.DELETE
 import org.http4k.core.Method.GET
 import org.http4k.core.Method.OPTIONS
@@ -33,7 +34,6 @@ import org.http4k.filter.GzipCompressionMode.Streaming
 import org.http4k.filter.SamplingDecision.Companion.DO_NOT_SAMPLE
 import org.http4k.filter.SamplingDecision.Companion.SAMPLE
 import org.http4k.filter.ServerFilters.ValidateRequestTracingHeaders
-import org.http4k.filter.ZipkinTracesStorage.Companion.INTERNAL_THREAD_LOCAL
 import org.http4k.hamkrest.hasBody
 import org.http4k.hamkrest.hasContentType
 import org.http4k.hamkrest.hasHeader
@@ -49,12 +49,16 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.fail
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.util.concurrent.ConcurrentLinkedQueue
+import org.http4k.filter.ServerFilters.ThreadLocalRequestFilter.INTERNAL_THREAD_LOCAL as REQUEST_THREAD_LOCAL
+import org.http4k.filter.ZipkinTracesStorage.Companion.INTERNAL_THREAD_LOCAL as ZIPKIN_THREAD_LOCAL
 
 class ServerFiltersTest {
 
     @BeforeEach
     fun before() {
-        INTERNAL_THREAD_LOCAL.remove()
+        ZIPKIN_THREAD_LOCAL.remove()
+        REQUEST_THREAD_LOCAL.remove()
     }
 
     @Nested
@@ -868,6 +872,82 @@ class ServerFiltersTest {
                 handler(Request(GET, "/dir/file.pdf")).header("Content-Disposition"),
                 equalTo("attachment; filename=file.pdf")
             )
+        }
+    }
+
+    @Nested
+    inner class ThreadLocalRequestFilter {
+
+        @Test
+        fun `when ThreadLocalRequestFilter is not invoked, the request is null`() {
+            val request = Request(GET, "/")
+
+            val handler: HttpHandler = {
+                val storedRequest = ServerFilters.ThreadLocalRequestFilter.REQUEST
+                assertThat(storedRequest, equalTo(null))
+                Response(OK)
+            }
+
+            handler(request)
+
+            assertThat(ServerFilters.ThreadLocalRequestFilter.REQUEST, equalTo(null))
+        }
+
+        @Test
+        fun `when ThreadLocalRequestFilter is invoked, the request can be accessed`() {
+            val request = Request(GET, "/")
+
+            val handler = ServerFilters.ThreadLocalRequestFilter().then {
+                val storedRequest = ServerFilters.ThreadLocalRequestFilter.REQUEST
+                assertThat(storedRequest, equalTo(request))
+                Response(OK)
+            }
+
+            handler(request)
+
+            assertThat(ServerFilters.ThreadLocalRequestFilter.REQUEST, equalTo(null))
+        }
+
+        @Test
+        fun `different threads get their own thread local request`() {
+
+            val storedRequests = ConcurrentLinkedQueue<Request?>()
+            val handler = ServerFilters.ThreadLocalRequestFilter().then {
+                storedRequests += ServerFilters.ThreadLocalRequestFilter.REQUEST
+                Response(OK)
+            }
+
+            val requests = List(50) { index -> Request(GET, "$index") }
+
+            val tasks = requests.map { Thread { handler(it) } }
+            tasks.forEach { it.start() }
+            tasks.forEach { it.join() }
+
+            val paths = storedRequests.filterNotNull().sortedBy { it.uri.path.toInt() }
+            assertThat(paths, equalTo(requests))
+
+            assertThat(ServerFilters.ThreadLocalRequestFilter.REQUEST, equalTo(null))
+        }
+
+        @Test
+        fun `when ThreadLocalRequestFilter is invoked, the request can be accessed in a class that cannot access the request directly`() {
+            val request = Request(GET, "/")
+
+            class MyTestClass {
+                fun assertRequestIsSet() {
+                    val storedRequest = ServerFilters.ThreadLocalRequestFilter.REQUEST
+                    assertThat(storedRequest, equalTo(request))
+                }
+            }
+
+            val handler = ServerFilters.ThreadLocalRequestFilter().then {
+                MyTestClass().assertRequestIsSet()
+                Response(OK)
+            }
+
+            handler(request)
+
+            assertThat(ServerFilters.ThreadLocalRequestFilter.REQUEST, equalTo(null))
         }
     }
 }
